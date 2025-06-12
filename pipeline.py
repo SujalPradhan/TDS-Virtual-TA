@@ -41,41 +41,15 @@ def generate_embedding(text_fragments):
             raise
 
 # === Vector database access ===
-# def initialize_knowledge_base(directory_path="vectorstore"):
-#     """Load vector database from disk"""
-#     # Create wrapper for compatibility with stored indexes
-#     embedding_interface = OpenAIEmbeddings(
-#         model="text-embedding-3-small",
-#         api_key="sk-placeholder",
-#         base_url="https://aiproxy.sanand.workers.dev/openai/v1"
-#     )
-#     return FAISS.load_local(directory_path, embedding_interface, allow_dangerous_deserialization=True)
-
-from langchain_community.document_loaders import TextLoader
-
 def initialize_knowledge_base(directory_path="vectorstore"):
-    """Load or build vector database"""
+    """Load vector database from disk"""
+    # Create wrapper for compatibility with stored indexes
     embedding_interface = OpenAIEmbeddings(
         model="text-embedding-3-small",
         api_key="sk-placeholder",
         base_url="https://aiproxy.sanand.workers.dev/openai/v1"
     )
-
-    index_file = os.path.join(directory_path, "index.faiss")
-
-    if os.path.exists(index_file):
-        print("✅ Found FAISS index. Loading from disk...")
-        return FAISS.load_local(directory_path, embedding_interface, allow_dangerous_deserialization=True)
-    elif os.path.exists("data/tds_content.txt"):
-        print("⚠️ FAISS index not found. Rebuilding knowledge base...")
-        loader = TextLoader("data/tds_content.txt")
-        documents = loader.load()
-        knowledge_base = FAISS.from_documents(documents, embedding_interface)
-        knowledge_base.save_local(directory_path)
-        print("✅ Vectorstore rebuilt and saved.")
-        return knowledge_base
-    else:
-        raise FileNotFoundError("❌ Neither vectorstore nor data/tds_content.txt found. Please upload at least one.")
+    return FAISS.load_local(directory_path, embedding_interface, allow_dangerous_deserialization=True)
 
 # === Query processing system ===
 def process_query(user_query, knowledge_base, result_count=5):
