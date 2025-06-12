@@ -30,7 +30,6 @@ ENV/
 # Data files and models
 *.vec
 *.index
-*.faiss
 data/
 
 # Jupyter Notebook
