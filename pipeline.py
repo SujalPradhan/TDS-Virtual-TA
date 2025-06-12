@@ -62,21 +62,20 @@ def initialize_knowledge_base(directory_path="vectorstore"):
     )
 
     index_file = os.path.join(directory_path, "index.faiss")
-    
+
     if os.path.exists(index_file):
         print("✅ Found FAISS index. Loading from disk...")
         return FAISS.load_local(directory_path, embedding_interface, allow_dangerous_deserialization=True)
-    else:
+    elif os.path.exists("data/tds_content.txt"):
         print("⚠️ FAISS index not found. Rebuilding knowledge base...")
-        # Load documents – replace this with your actual data loading logic
-        loader = TextLoader("data/tds_content.txt")  # or load PDF, web data, etc.
+        loader = TextLoader("data/tds_content.txt")
         documents = loader.load()
-        
-        # Build vectorstore and save it
         knowledge_base = FAISS.from_documents(documents, embedding_interface)
         knowledge_base.save_local(directory_path)
         print("✅ Vectorstore rebuilt and saved.")
         return knowledge_base
+    else:
+        raise FileNotFoundError("❌ Neither vectorstore nor data/tds_content.txt found. Please upload at least one.")
 
 # === Query processing system ===
 def process_query(user_query, knowledge_base, result_count=5):
