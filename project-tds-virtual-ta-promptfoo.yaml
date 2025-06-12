@@ -1,0 +1,103 @@
+description: "TDS Virtual TA Project Sample (but not the actual evaluation) Questions"
+
+
+
+
+providers:
+  - id: https
+    config:
+      url: http://0.0.0.0:8000/ # Replace this with your API endpoint
+      method: POST
+      headers:
+        Content-Type: application/json
+      body: |
+        {
+          "question": "{{ question }}"{% if image %},
+          "image": "{{ image }}"{% endif %}
+        }
+      transformResponse: json
+
+# Ensure JSON schema
+defaultTest:
+  options:
+    provider:
+      id: https
+      config:
+        url: https://aiproxy.sanand.workers.dev/openai/v1/chat/completions
+        method: POST
+        headers:
+          Content-Type: application/json
+          Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjIzZjIwMDQ3NTlAZHMuc3R1ZHkuaWl0bS5hYy5pbiJ9.u1s1MCA9VSHZQ12MP_2yzbkSk6-UpFBNgF7Y6QjgQIM
+  # Replace with your token
+        body: |
+          {
+            "model": "gpt-4o-mini",
+            "messages": [
+              {"role": "system", "content": "You are an evaluator that checks if an output meets specific criteria. Analyze the output based on the given rubric and respond with a JSON object containing {\"reason\": \"your analysis\", \"score\": number between 0.0 and 1.0, \"pass\": true/false}."},
+              {"role": "user", "content": "Output to evaluate: {{ output }}\n\nRubric: {{ rubric }}"}
+            ],
+            "temperature": 0
+          }
+        transformResponse: json
+  assert:
+    - type: is-json
+      value:
+        type: object
+        required: [answer, links]
+        properties:
+          answer: { type: string }
+          links:
+            type: array
+            items:
+              type: object
+              required: [url, text]
+              properties:
+                url: { type: string }
+                text: { type: string }
+
+tests:
+  - vars:
+      question: The question asks to use gpt-3.5-turbo-0125 model but the ai-proxy provided by Anand sir only supports gpt-4o-mini. So should we just use gpt-4o-mini or use the OpenAI API for gpt3.5 turbo?
+      image: "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"
+      link: https://discourse.onlinedegree.iitm.ac.in/t/ga5-question-8-clarification/155939
+    assert:
+      - type: llm-rubric
+        transform: output.answer
+        value: Clarifies use of gpt-3.5-turbo-0125 not gpt-4o-mini
+      - type: contains
+        transform: JSON.stringify(output.links)
+        value: https://discourse.onlinedegree.iitm.ac.in/t/ga5-question-8-clarification/155939
+
+  - vars:
+      question: If a student scores 10/10 on GA4 as well as a bonus, how would it appear on the dashboard?
+      link: https://discourse.onlinedegree.iitm.ac.in/t/ga4-data-sourcing-discussion-thread-tds-jan-2025/165959/388
+    assert:
+      - type: llm-rubric
+        transform: output.answer
+        value: Mentions the dashboard showing "110"
+      - type: contains
+        transform: JSON.stringify(output.links)
+        value: https://discourse.onlinedegree.iitm.ac.in/t/ga4-data-sourcing-discussion-thread-tds-jan-2025/165959
+  - vars:
+      question: I know Docker but have not used Podman before. Should I use Docker for this course?
+    assert:
+      - type: llm-rubric
+        transform: output.answer
+        value: Recommends Podman for the course
+      - type: llm-rubric
+        transform: output.answer
+        value: Mentions that Docker is acceptable
+      - type: contains
+        transform: JSON.stringify(output.links)
+        value: https://tds.s-anand.net/#/docker
+  - vars:
+      question: When is the TDS Sep 2025 end-term exam?
+    assert:
+      - type: llm-rubric
+        transform: output.answer
+        value: Says it doesn't know (since this information is not available yet)
+
+writeLatestResults: true
+
+commandLineOptions:
+  cache: true
