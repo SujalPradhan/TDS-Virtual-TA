@@ -1,9 +1,8 @@
 services:
   - type: web
-    name: tds-virtual-ta
-    env: python
+    name: TDS-Virtual-TA
+    runtime: python
+    region: oregon  # or choose another region like frankfurt, singapore, etc.
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn main:app --host=0.0.0.0 --port=10000"
-    envVars:
-      - key: OPENAI_API_KEY
-        value: your_openai_key_here
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    plan: free
