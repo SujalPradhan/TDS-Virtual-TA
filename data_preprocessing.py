@@ -1,111 +1,125 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import json
 import os
-import traceback
 from tqdm import tqdm
-from langchain_core.documents import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+import numpy as np
+from collections import namedtuple
+import pickle
+import shutil
+
+# Custom document structure
+TextDocument = namedtuple('TextDocument', ['content', 'metadata'])
+
+# Set up similarity search framework
+class TextVectorIndex:
+    def __init__(self, embedding_func):
+        self.embedding_function = embedding_func
+        self.vectors = []
+        self.documents = []
+        
+    def add_documents(self, documents):
+        """Add documents to the vector index"""
+        print("Generating vector embeddings...")
+        for doc in tqdm(documents):
+            vector = self.embedding_function([doc.content])[0]
+            self.vectors.append(vector)
+            self.documents.append(doc)
+            
+    def save(self, directory):
+        """Save the index to disk"""
+        os.makedirs(directory, exist_ok=True)
+        # Create a binary vector file using numpy
+        vector_array = np.array(self.vectors, dtype=np.float32)
+        np.save(os.path.join(directory, "index.npy"), vector_array)
+        
+        # Save documents separately
+        with open(os.path.join(directory, "documents.pkl"), "wb") as f:
+            pickle.dump(self.documents, f)
+            
+        # Create a faiss-compatible index file for compatibility
+        try:
+            import faiss
+            dimension = len(self.vectors[0])
+            index = faiss.IndexFlatL2(dimension)
+            index.add(vector_array)
+            faiss.write_index(index, os.path.join(directory, "index.faiss"))
+            
+            # Create compatibility pkl file
+            shutil.copy(os.path.join(directory, "documents.pkl"), 
+                       os.path.join(directory, "index.pkl"))
+        except ImportError:
+            print("Warning: faiss not available, creating only numpy storage")
+
+# Import needed for API compatibility
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_openai import OpenAIEmbeddings
+from langchain_core.documents import Document 
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
+# Load data from source files
+def load_data():
+    with open("data/tds_content.json", encoding="utf-8") as f:
+        tds_data = json.load(f)
+    with open("data/discourse_forum_posts.json", encoding="utf-8") as f:
+        discourse_data = json.load(f)
+    return tds_data, discourse_data
 
-def extract_content_from_files():
-    """Extract content from markdown and JSON files"""
-    print("📖 Extracting source material...")
-    
-    # Read markdown content as plain text
-    try:
-        with open("data/tds_content.json", encoding="utf-8") as file_handle:
-            tools_content = file_handle.read()
-    except Exception as error:
-        print(f"Error reading markdown file: {error}")
-        tools_content = ""
-        
-    # Parse forum discussions from JSON
-    try:
-        with open("data/discourse_forum_posts.json", encoding="utf-8") as file_handle:
-            forum_discussions = json.load(file_handle)
-    except Exception as error:
-        print(f"Error reading forum data: {error}")
-        forum_discussions = []
-        
-    return tools_content, forum_discussions
+# Process content into manageable text segments
+def chunk_data(tds_data, discourse_data):
+    documents = []
 
-def segment_content_into_documents(tools_content, forum_discussions):
-    """Transform raw content into document segments for processing"""
-    content_documents = []
-    
-    # Create document from tools content
-    tools_doc = Document(
-        page_content=tools_content,
-        metadata={
-            "title": "Tools in Data Science",
-            "source_url": "https://tds.s-anand.net"
-        }
-    )
-    content_documents.append(tools_doc)
-    
-    # Process each forum post as a separate document
-    for discussion in tqdm(forum_discussions, desc="Processing forum posts"):
-        post_url = discussion.get("topic_url", "Source unavailable")
-        post_title = discussion.get("title", "Untitled post")
-        
-        forum_doc = Document(
-            page_content=discussion["content"],
-            metadata={
-                "title": post_title, 
-                "source_url": post_url
-            }
+    # Process TDS content
+    for topic in tqdm(tds_data, desc="TDS"):
+        url = topic.get("url", "https://tds.s-anand.net")
+        document = Document(
+            page_content=topic["content"],
+            metadata={"title": topic["title"], "source": url}
         )
-        content_documents.append(forum_doc)
-    
-    # Divide documents into manageable chunks
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000, 
-        chunk_overlap=200,
-        separators=["\n\n", "\n", ". ", " ", ""]
+        documents.append(document)
+
+    # Process discourse forum data
+    for post in tqdm(discourse_data, desc="Discourse"):
+        source = post.get("topic_url", "Unknown")
+        title = post.get("title", source)
+        document = Document(
+            page_content=post["content"],
+            metadata={"title": title, "source": f"Discourse: {source}"}
+        )
+        documents.append(document)
+
+    # Split into manageable chunks
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    return text_splitter.split_documents(documents)
+
+# Create vector embeddings from text
+def embed_text(docs):
+    embedding_model = OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        api_key=os.getenv("AIPROXY_TOKEN"),
+        base_url="https://aiproxy.sanand.workers.dev/openai/v1"
     )
-    
-    return text_splitter.split_documents(content_documents)
+    return FAISS.from_documents(docs, embedding_model)
 
-def generate_vector_embeddings(document_chunks):
-    """Convert document chunks to vector embeddings"""
-    try:
-        print(f"🔢 Converting {len(document_chunks)} text segments to vector space...")
-        # Use local embedding model to avoid API dependencies
-        embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        vector_db = FAISS.from_documents(document_chunks, embedding_model)
-        return vector_db
-    except Exception as error:
-        print(f"Embedding generation failed: {error}")
-        print(traceback.format_exc())
-        raise RuntimeError("Vector embedding process failed. Check the logs for details.")
+# Store the vector index
+def save_index(index, path="vectorstore"):
+    os.makedirs(path, exist_ok=True)
+    index.save_local(path)
 
-def persist_vector_database(vector_db, storage_dir="vectorstore"):
-    """Save vector database to disk for later retrieval"""
-    # Ensure storage directory exists
-    os.makedirs(storage_dir, exist_ok=True)
-    
-    # Save the index to the specified path
-    vector_db.save_local(storage_dir)
-    print(f"💾 Vector database saved to {storage_dir}")
+# Main process to index all content
+def index_data():
+    print("🔍 Processing and segmenting content...")
+    tds_data, discourse_data = load_data()
+    text_segments = chunk_data(tds_data, discourse_data)
 
-def process_and_index_content():
-    """Main processing pipeline to convert content to searchable vector database"""
-    print("🚀 Starting content processing pipeline...")
-    
-    # Step 1: Extract content from source files
-    tools_content, forum_discussions = extract_content_from_files()
-    
-    # Step 2: Transform content into searchable document chunks
-    document_chunks = segment_content_into_documents(tools_content, forum_discussions)
-    
-    # Step 3: Generate vector embeddings from document chunks
-    vector_db = generate_vector_embeddings(document_chunks)
-    
-    # Step 4: Save vector database to disk
-    persist_vector_database(vector_db)
-    
-    print("✅ Content processing complete!")
+    print(f"✍️ Creating embeddings for {len(text_segments)} text segments...")
+    vector_index = embed_text(text_segments)
+
+    print("💾 Persisting vector database...")
+    save_index(vector_index)
+
+    print("✅ Indexing process completed!")
 
 if __name__ == "__main__":
-    process_and_index_content()
+    index_data()

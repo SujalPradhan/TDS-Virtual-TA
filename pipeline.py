@@ -1,183 +1,123 @@
 """
-Knowledge Retrieval and Response Generation System
-This module handles vector storage operations and AI-powered question answering
+TDS Knowledge Retrieval System
+This module manages semantic search operations and LLM-assisted question answering capabilities
 """
 
 import json
-import os
-import traceback
-from typing import List, Dict, Tuple, Any
 from dotenv import load_dotenv
-from pathlib import Path
+load_dotenv()
 
-# Make sure we're loading from the correct path
-dotenv_path = Path(os.path.dirname(os.path.abspath(__file__))) / '.env'
-load_dotenv(dotenv_path=dotenv_path)
-
+import os
+import numpy as np
 import httpx
+import time
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import OpenAIEmbeddings, HuggingFaceEmbeddings
+from langchain_community.embeddings import OpenAIEmbeddings
 
-
-# Configuration for API access
-API_KEY = os.environ.get("AIPROXY_TOKEN")
+# === Service access configuration ===
+API_TOKEN = os.environ.get("AIPROXY_TOKEN")
 API_ENDPOINT = "https://aiproxy.sanand.workers.dev/openai"
-print("🔑 API key verification status:", "Available" if API_KEY else "Missing")
-if not API_KEY:
-    raise ValueError("API_KEY not found in environment variables. Please check your .env file.")
-print(f"API key length: {len(API_KEY) if API_KEY else 0}")
+print("🔑 API token status:", "Available" if API_TOKEN else "Missing")
 
-def create_text_embeddings(text_fragments: List[str]) -> List[List[float]]:
-    """
-    Transform text into numerical vector representations using embedding API
-    
-    Args:
-        text_fragments: List of text strings to convert to embeddings
-        
-    Returns:
-        List of embedding vectors (each vector is a list of floats)
-    """
-    # Use HuggingFace embeddings for consistency with data preprocessing
-    embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    return [embedding_model.embed_query(text) for text in text_fragments]
+# === Vector encoding service ===
+def generate_embedding(text_fragments):
+    """Transform text into numerical vectors"""
+    endpoint = f"{API_ENDPOINT}/v1/embeddings"
+    auth_header = {"Authorization": f"Bearer {API_TOKEN}"}
+    request_body = {
+        "model": "text-embedding-3-small",
+        "input": text_fragments
+    }
 
-def initialize_vector_database(storage_location: str = "vectorstore") -> Any:
-    """
-    Load vector database from disk storage
-    
-    Args:
-        storage_location: Path to the stored vector database
-        
-    Returns:
-        Initialized vector database instance
-    """
-    try:
-        # Configure embeddings with the same model used for creating the database
-        embeddings_config = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        
-        # Load the vector database from disk
-        return FAISS.load_local(
-            storage_location, 
-            embeddings_config, 
-            allow_dangerous_deserialization=True
-        )
-    except Exception as error:
-        print(f"Failed to initialize vector database: {error}")
-        print(traceback.format_exc())
-        raise
-
-def retrieve_and_generate_answer(query: str, knowledge_base: Any, result_count: int = 5) -> Tuple[str, List[Dict[str, str]]]:
-    """
-    Process a question by retrieving relevant context and generating an answer
-    
-    Args:
-        query: The user's question
-        knowledge_base: Vector database containing knowledge
-        result_count: Number of relevant documents to retrieve
-        
-    Returns:
-        Tuple of (answer_text, source_references)
-    """
-    try:
-        # Convert question to vector representation
-        query_vector = create_text_embeddings([query])[0]
-        
-        # Find relevant documents in the knowledge base
-        relevant_docs = knowledge_base.similarity_search_by_vector(
-            query_vector, 
-            k=result_count
-        )
-        
-        # Combine retrieved documents into context
-        knowledge_context = "\n\n".join([doc.page_content for doc in relevant_docs])
-    
-        # Prepare request to language model
-        request_endpoint = f"{API_ENDPOINT}/v1/chat/completions"
-        auth_headers = {"Authorization": f"Bearer {API_KEY}"}
-        
-        # Structure request body with system message and user query
-        request_body = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an educational assistant for the Tools for Data Science course. "
-                        "Provide clear, accurate responses based on this reference material:\n\n"
-                        f"{knowledge_context}\n\n"
-                        "If source information is available, format your response as JSON with this structure:\n"
-                        "{\n  \"answer\": \"your detailed response\",\n  \"links\": [\n    {\"url\": \"source_url\", \"text\": \"brief description\"}, ...\n  ]\n}\n"
-                        "If no source information is available, provide a plain text response."
-                    )
-                },
-                {"role": "user", "content": query}
-            ]
-        }
-
-        # Send request to language model
+    # Send request with timeout protection
+    with httpx.Client(timeout=30.0) as session:
         try:
-            with httpx.Client(timeout=60.0) as http_client:  # Increased timeout
-                response = http_client.post(
-                    request_endpoint, 
-                    headers=auth_headers, 
-                    json=request_body
+            api_response = session.post(endpoint, headers=auth_header, json=request_body)
+            api_response.raise_for_status()
+            response_data = api_response.json()
+            return [record["embedding"] for record in response_data["data"]]
+        except (httpx.RequestError, httpx.HTTPStatusError) as err:
+            print(f"Error generating embeddings: {err}")
+            raise
+
+# === Vector database access ===
+def initialize_knowledge_base(directory_path="vectorstore"):
+    """Load vector database from disk"""
+    # Create wrapper for compatibility with stored indexes
+    embedding_interface = OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        api_key="sk-placeholder",
+        base_url="https://aiproxy.sanand.workers.dev/openai/v1"
+    )
+    return FAISS.load_local(directory_path, embedding_interface, allow_dangerous_deserialization=True)
+
+# === Query processing system ===
+def process_query(user_query, knowledge_base, result_count=5):
+    """Find relevant information and generate response"""
+    # Convert question to vector representation
+    start_time = time.time()
+    query_vector = np.array(generate_embedding([user_query])[0], dtype=np.float32)
+    
+    # Ensure dimensional compatibility with knowledge base
+    vector_dimension = knowledge_base.index.d
+    
+    # Handle dimension mismatch if necessary
+    if len(query_vector) != vector_dimension:
+        print(f"⚠️ Vector dimension mismatch. Got {len(query_vector)}, expected {vector_dimension}")
+        # Align dimensions through padding or truncation
+        if len(query_vector) < vector_dimension:
+            query_vector = np.pad(query_vector, (0, vector_dimension - len(query_vector)))
+        else:
+            query_vector = query_vector[:vector_dimension]
+    
+    # Retrieve most relevant documents
+    relevant_docs = knowledge_base.similarity_search_by_vector(query_vector, k=result_count)
+    relevant_text = "\n\n".join([doc.page_content for doc in relevant_docs])
+    
+    # Prepare for LLM consultation
+    endpoint = f"{API_ENDPOINT}/v1/chat/completions"
+    auth_header = {"Authorization": f"Bearer {API_TOKEN}"}
+    request_body = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a knowledgeable Teaching Assistant for the Tools for Data Science (TDS) course. "
+                    "Respond to questions based on this reference information:\n\n"
+                    f"{relevant_text}\n\n"
+                    "If reference information includes source links, format your response as JSON:\n"
+                    "{\n  \"answer\": \"...\",\n  \"links\": [\n    {\"url\": \"...\", \"text\": \"...\"}, ...\n  ]\n}\n"
+                    "Otherwise, provide a plain text response."
                 )
-                response.raise_for_status()
-                result = response.json()
-                generated_text = result["choices"][0]["message"]["content"].strip()
-        except httpx.HTTPStatusError as error:
-            print(f"HTTP error during answer generation: {error.response.status_code}, {error.response.text}")
-            raise
-        except httpx.RequestError as error:
-            print(f"Request error during answer generation: {error}")
-            raise
+            },
+            {"role": "user", "content": user_query}
+        ]
+    }
 
-        # Parse the response, handling both JSON and plain text formats
-        try:
-            parsed_response = json.loads(generated_text)
+    # Request answer from language model
+    with httpx.Client(timeout=30.0) as session:
+        api_response = session.post(endpoint, headers=auth_header, json=request_body)
+        api_response.raise_for_status()
+        response_data = api_response.json()
+        model_response = response_data["choices"][0]["message"]["content"].strip()
 
-            answer_content = parsed_response.get("answer", generated_text)
+    # Process and structure the response
+    try:
+        parsed_response = json.loads(model_response)
+        final_answer = parsed_response["answer"]
+        reference_links = parsed_response.get("links", [])
+    except (json.JSONDecodeError, KeyError, TypeError):
+        # Fall back to plain text with auto-extracted references
+        final_answer = model_response
+        reference_links = []
+        for doc in relevant_docs:
+            source_url = doc.metadata.get("source", "Unknown")
+            content_preview = doc.page_content.strip().split("\n")[0][:300]
+            reference_links.append({
+                "url": source_url,
+                "text": content_preview
+            })
 
-            source_links = parsed_response.get("links", [])
-
-
-
-            # If LLM gave empty links, use fallback from relevant_docs
-
-            if not source_links:
-
-                for doc in relevant_docs:
-
-                    source_url = doc.metadata.get("source_url", "Unknown source")
-
-                    content_preview = doc.page_content.strip().split("\n")[0][:300]
-
-                    source_links.append({
-
-                        "url": source_url,
-
-                        "text": content_preview
-
-                    })
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            print(f"JSON parsing error: {e}, falling back to plain text")
-            # Fall back to plain text response with automatic source references
-            answer_content = generated_text
-            source_links = []
-            
-            # Extract source information from retrieved documents
-            for doc in relevant_docs:
-                source_url = doc.metadata.get("source_url", "Unknown source")
-                # Use first line or fragment of content as description
-                content_preview = doc.page_content.strip().split("\n")[0][:300]
-                source_links.append({
-                    "url": source_url,
-                    "text": content_preview
-                })
-
-        return answer_content, source_links
-        
-    except Exception as error:
-        print(f"Error in retrieve_and_generate_answer: {error}")
-        print(traceback.format_exc())
-        raise
+    print(f"⏱️ Query processed in {time.time() - start_time:.2f} seconds")
+    return final_answer, reference_links

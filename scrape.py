@@ -1,136 +1,175 @@
+"""
+Discourse Forum Content Collector
+This module extracts course-related discussions from the IITM online platform
+"""
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 from datetime import datetime
 import json
 import time
 import os
+import logging
+from typing import List, Dict, Any, Optional
 
-BASE_URL = "https://discourse.onlinedegree.iitm.ac.in"
-LOGIN_URL = f"{BASE_URL}/login"
-CATEGORY_URL = f"{BASE_URL}/c/courses/tds-kb/34"
-START_DATE = datetime(2025, 1, 1)
-END_DATE = datetime(2025, 4, 14)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("forum-collector")
 
-def parse_created_at(date_str):
+# Platform configuration
+PLATFORM_ROOT = "https://discourse.onlinedegree.iitm.ac.in"
+AUTHENTICATION_URL = f"{PLATFORM_ROOT}/login"
+COURSE_CONTENT_URL = f"{PLATFORM_ROOT}/c/courses/tds-kb/34"
+
+# Content date filtering parameters
+COLLECTION_START = datetime(2025, 1, 1)
+COLLECTION_END = datetime(2025, 4, 14)
+
+def normalize_timestamp(timestamp_text: str) -> Optional[datetime]:
+    """Convert text date to datetime object"""
     try:
-        return datetime.strptime(date_str, "%b %d, %Y %I:%M %p")
+        return datetime.strptime(timestamp_text, "%b %d, %Y %I:%M %p")
     except ValueError:
+        logger.warning(f"Could not parse date: {timestamp_text}")
         return None
 
-def is_within_range(dt):
-    return dt and START_DATE <= dt <= END_DATE
+def is_date_in_target_range(dt: Optional[datetime]) -> bool:
+    """Check if date is within collection period"""
+    return dt and COLLECTION_START <= dt <= COLLECTION_END
 
-def scrape_forum():
-    with sync_playwright() as p:
-        user_data_dir = "playwright_user_data"
-        os.makedirs(user_data_dir, exist_ok=True)
-        context = p.chromium.launch_persistent_context(user_data_dir, headless=False)
-        page = context.pages[0] if context.pages else context.new_page()
-
-        # Go to homepage
-        page.goto(BASE_URL)
-        time.sleep(3)
-
-        # Pause for manual login
-        if LOGIN_URL in page.url:
-            print("🔐 Please log in manually in the browser window.")
-            input("✅ After logging in and seeing the homepage, press Enter here...")
-
-        result = []
-
-        for page_num in range(1, 10):  # Adjust upper range if needed
-            paged_url = f"{CATEGORY_URL}?page={page_num}"
-            print(f"\n📄 Scraping category page: {paged_url}")
-            page.goto(paged_url)
-            time.sleep(3)
-
-            soup = BeautifulSoup(page.content(), "html.parser")
-            topics = soup.select("tr.topic-list-item")
-            if not topics:
-                print(f"❌ No topics found on page {page_num}. Stopping.")
-                break
-
-            for topic_row in topics:
-                # Extract topic URL
-                title_tag = topic_row.select_one("a.title.raw-link")
-                if not title_tag:
-                    continue
-                href = title_tag.get("href")
-                if not href or not href.startswith("/t/"):
-                    continue
-                topic_url = BASE_URL + href
-
-                # Extract created date from the <td> with title attribute
-                age_td = topic_row.select_one("td.activity.num.topic-list-data.age")
-                created_dt = None
-                if age_td and age_td.has_attr("title"):
-                    # title looks like: "Created: May 23, 2025 3:06 am\nLatest: May 27, 2025 1:14 pm"
-                    title_attr = age_td["title"]
-                    # Extract the "Created: ..." part
-                    created_line = [line for line in title_attr.split("\n") if line.startswith("Created:")]
-                    if created_line:
-                        created_str = created_line[0].replace("Created:", "").strip()
-                        created_dt = parse_created_at(created_str)
-
-                if not is_within_range(created_dt):
-                    print(f"Skipping topic {topic_url} created at {created_dt} (outside range)")
-                    continue
-
-                print(f"🧵 Fetching topic: {topic_url} (created at {created_dt})")
-                page.goto(topic_url)
-                time.sleep(2)
-
-                # Scroll to load all posts
-                for _ in range(5):
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    time.sleep(2)
-
-                topic_html = page.content()
-                topic_soup = BeautifulSoup(topic_html, "html.parser")
-                posts = topic_soup.select("div.topic-post")
-
-                print(f"   💬 Found {len(posts)} posts")
-                for post in posts:
-                    # Wait for relative-date spans to load in JS-rendered DOM
-                    page.wait_for_selector("span.relative-date", timeout=5000)
-
-                    created_at = None
-                    created_at_tag = post.select_one("span.relative-date")
-
-                    if created_at_tag:
-                        created_at = created_at_tag.get("title")
-                        if created_at:
-                            print(f"🕒 Post date: {created_at}")
-                        else:
-                            print("⚠️ Found date tag but no title attribute")
-                    else:
-                        print("⚠️ No date tag found")
-
-                    if not created_at or not is_within_range(parse_created_at(created_at)):
-                        continue
-
-                    author = post.get("data-user-card") or "unknown"
-                    content_div = post.select_one(".cooked")
-                    content_text = content_div.get_text(separator="\n", strip=True) if content_div else ""
-                    print(f"   ✍️ Author: {author}, Content length: {len(content_text)}")
-
-                    result.append({
-                        "topic_url": topic_url,
-                        "author": author,
-                        "created_at": created_at,
-                        "content": content_text
-                    })
-
-        os.makedirs("data", exist_ok=True)
-        with open("data/discourse_forum_posts.json", "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-
-        print("\n✅ Discourse scraping complete!")
+def collect_forum_content():
+    """Primary function to extract and save forum content"""
+    collected_posts = []
+    
+    with sync_playwright() as browser_factory:
+        # Initialize persistent browser session
+        user_session_dir = "playwright_user_data"
+        os.makedirs(user_session_dir, exist_ok=True)
         
-        # Keep browser open until user decides to close it
-        print("\n🌐 Browser window remains open for your inspection.")
-        input("Press Enter when you're ready to close the browser and finish...")
-        context.close()
+        browser_context = browser_factory.chromium.launch_persistent_context(
+            user_session_dir, 
+            headless=False,
+            viewport={"width": 1280, "height": 800}
+        )
+        
+        browser_page = browser_context.pages[0] if browser_context.pages else browser_context.new_page()
+        
+        # Initialize platform access
+        logger.info("🌐 Accessing educational platform...")
+        browser_page.goto(PLATFORM_ROOT)
+        time.sleep(2)
+        
+        # Handle authentication if needed
+        if AUTHENTICATION_URL in browser_page.url:
+            logger.info("🔒 Authentication required - Please log in manually")
+            input("✅ Press Enter after completing authentication...")
+        
+        # Iterate through forum pages
+        for page_index in range(1, 10):
+            current_page_url = f"{COURSE_CONTENT_URL}?page={page_index}"
+            logger.info(f"📋 Processing discussion page {page_index}")
+            
+            browser_page.goto(current_page_url)
+            time.sleep(2)
+            
+            # Extract topics from page
+            page_content = BeautifulSoup(browser_page.content(), "html.parser")
+            topic_elements = page_content.select("tr.topic-list-item")
+            
+            if not topic_elements:
+                logger.info(f"🛑 No more topics found on page {page_index}. Collection complete.")
+                break
+            
+            # Process each topic in the current page
+            for topic_element in topic_elements:
+                # Find topic link
+                title_element = topic_element.select_one("a.title.raw-link")
+                if not title_element:
+                    continue
+                    
+                topic_path = title_element.get("href")
+                if not topic_path or not topic_path.startswith("/t/"):
+                    continue
+                    
+                topic_url = f"{PLATFORM_ROOT}{topic_path}"
+                
+                # Extract topic creation timestamp
+                date_element = topic_element.select_one("td.activity.num.topic-list-data.age")
+                creation_date = None
+                
+                if date_element and date_element.has_attr("title"):
+                    date_text = date_element["title"]
+                    created_prefix = [line for line in date_text.split("\n") if "Created:" in line]
+                    
+                    if created_prefix:
+                        date_text = created_prefix[0].replace("Created:", "").strip()
+                        creation_date = normalize_timestamp(date_text)
+                
+                # Skip content outside collection period
+                if not is_date_in_target_range(creation_date):
+                    logger.debug(f"⏭️ Skipping topic from {creation_date} (outside collection period)")
+                    continue
+                
+                # Process individual topic
+                logger.info(f"📄 Retrieving discussion: {topic_url}")
+                browser_page.goto(topic_url)
+                
+                # Ensure dynamic content loads by scrolling
+                for _ in range(3):
+                    browser_page.evaluate("window.scrollBy(0, window.innerHeight)")
+                    time.sleep(1.5)
+                
+                # Extract posts from topic
+                topic_content = BeautifulSoup(browser_page.content(), "html.parser")
+                post_elements = topic_content.select("div.topic-post")
+                
+                logger.info(f"   Found {len(post_elements)} contributions")
+                
+                # Process each post in topic
+                for post_element in post_elements:
+                    # Ensure dynamic date elements are loaded
+                    try:
+                        browser_page.wait_for_selector("span.relative-date", timeout=3000)
+                    except:
+                        logger.warning("   ⚠️ Timeout waiting for date elements")
+                    
+                    post_date_element = post_element.select_one("span.relative-date")
+                    post_date = None
+                    
+                    if post_date_element and post_date_element.has_attr("title"):
+                        post_date = post_date_element.get("title")
+                    
+                    # Skip posts outside collection period
+                    if not post_date or not is_date_in_target_range(normalize_timestamp(post_date)):
+                        continue
+                    
+                    # Extract post metadata and content
+                    contributor = post_element.get("data-user-card") or "anonymous"
+                    content_container = post_element.select_one(".cooked")
+                    content = content_container.get_text(separator="\n", strip=True) if content_container else ""
+                    
+                    if content:
+                        collected_posts.append({
+                            "topic_url": topic_url,
+                            "author": contributor,
+                            "created_at": post_date,
+                            "content": content
+                        })
+        
+        # Save collected content
+        os.makedirs("data", exist_ok=True)
+        output_file = "data/discourse_forum_posts.json"
+        
+        with open(output_file, "w", encoding="utf-8") as json_file:
+            json.dump(collected_posts, json_file, ensure_ascii=False, indent=2)
+        
+        logger.info(f"✅ Collection complete. Saved {len(collected_posts)} posts to {output_file}")
+        
+        # Allow manual inspection before closing
+        input("Press Enter to close browser and complete the process...")
+        browser_context.close()
 
 if __name__ == "__main__":
-    scrape_forum()
+    collect_forum_content()
